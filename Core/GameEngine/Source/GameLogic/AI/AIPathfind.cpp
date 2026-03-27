@@ -1107,6 +1107,8 @@ Real Path::computeFlightDistToGoal( const Coord3D *pos, Coord3D& goalPos )
 PathfindCellInfo *PathfindCellInfo::s_infoArray = nullptr;
 PathfindCellInfo *PathfindCellInfo::s_firstFree = nullptr;
 
+PathfindCellInfo** PathfindCellList::s_heap = nullptr;
+
 #if RETAIL_COMPATIBLE_PATHFINDING
 // TheSuperHackers @info This variable is here so the code will run down the retail compatible path till a failure mode is hit
 // The pathfinding will then switch over to the corrected pathfinding code for SH clients
@@ -1118,6 +1120,7 @@ void PathfindCellInfo::forceCleanPathFindCellInfos()
 	for (Int i = 0; i < CELL_INFOS_TO_ALLOCATE - 1; i++) {
 		s_infoArray[i].m_nextOpen = nullptr;
 		s_infoArray[i].m_prevOpen = nullptr;
+		s_infoArray[i].m_heapIndex = -1;
 		s_infoArray[i].m_open = FALSE;
 		s_infoArray[i].m_closed = FALSE;
 	}
@@ -1167,6 +1170,7 @@ void PathfindCellInfo::allocateCellInfos()
 		s_infoArray[i].m_pathParent = &s_infoArray[i+1];
 		s_infoArray[i].m_isFree = true;
 	}
+	PathfindCellList::allocateHeap();
 }
 
 /**
@@ -1187,6 +1191,7 @@ void PathfindCellInfo::releaseCellInfos()
 	delete[] s_infoArray;
 	s_infoArray = nullptr;
 	s_firstFree = nullptr;
+	PathfindCellList::releaseHeap();
 }
 
 /**
@@ -1207,6 +1212,7 @@ PathfindCellInfo *PathfindCellInfo::getACellInfo(PathfindCell *cell,const ICoord
 		info->m_pathParent = nullptr;
 		info->m_costSoFar = 0;
 		info->m_totalCost = 0;
+		info->m_heapIndex = -1;
 		info->m_open = 0;
 		info->m_closed = 0;
 		info->m_obstacleID = INVALID_ID;
@@ -1241,6 +1247,99 @@ Bool PathfindCellList::canReverseSort(PathfindCell& currentCell) const
 		return m_head->getTotalCostDifference(currentCell) > m_tail->getTotalCostDifference(currentCell);
 
 	return false;
+}
+
+//-----------------------------------------------------------------------------------
+
+PathfindCell* PathfindCellList::getHead() const
+{
+	if (m_heapSize > 0)
+		return s_heap[0]->m_cell;
+	return m_head;
+}
+
+PathfindCell* PathfindCellList::getHeapCell(UnsignedInt index) const
+{
+	DEBUG_ASSERTCRASH(index < m_heapSize, ("Heap index out of bounds."));
+	return s_heap[index]->m_cell;
+}
+
+void PathfindCellList::allocateHeap()
+{
+	releaseHeap();
+	s_heap = MSGNEW("PathfindCellListHeap") PathfindCellInfo*[CELL_INFOS_TO_ALLOCATE];
+}
+
+void PathfindCellList::releaseHeap()
+{
+	if (s_heap) {
+		delete[] s_heap;
+		s_heap = nullptr;
+	}
+}
+
+void PathfindCellList::heapSiftUp(UnsignedInt index)
+{
+	while (index > 0) {
+		UnsignedInt parent = (index - 1) / 2;
+		if (s_heap[index]->m_totalCost < s_heap[parent]->m_totalCost) {
+			PathfindCellInfo* temp = s_heap[index];
+			s_heap[index] = s_heap[parent];
+			s_heap[parent] = temp;
+			s_heap[index]->m_heapIndex = index;
+			s_heap[parent]->m_heapIndex = parent;
+			index = parent;
+		} else {
+			break;
+		}
+	}
+}
+
+void PathfindCellList::heapSiftDown(UnsignedInt index)
+{
+	while (true) {
+		UnsignedInt smallest = index;
+		UnsignedInt left = 2 * index + 1;
+		UnsignedInt right = 2 * index + 2;
+		if (left < m_heapSize && s_heap[left]->m_totalCost < s_heap[smallest]->m_totalCost)
+			smallest = left;
+		if (right < m_heapSize && s_heap[right]->m_totalCost < s_heap[smallest]->m_totalCost)
+			smallest = right;
+		if (smallest != index) {
+			PathfindCellInfo* temp = s_heap[index];
+			s_heap[index] = s_heap[smallest];
+			s_heap[smallest] = temp;
+			s_heap[index]->m_heapIndex = index;
+			s_heap[smallest]->m_heapIndex = smallest;
+			index = smallest;
+		} else {
+			break;
+		}
+	}
+}
+
+void PathfindCellList::heapPush(PathfindCellInfo* info)
+{
+	DEBUG_ASSERTCRASH(m_heapSize < CELL_INFOS_TO_ALLOCATE, ("Heap overflow."));
+	info->m_heapIndex = m_heapSize;
+	s_heap[m_heapSize] = info;
+	m_heapSize++;
+	heapSiftUp(info->m_heapIndex);
+}
+
+void PathfindCellList::heapRemove(PathfindCellInfo* info)
+{
+	DEBUG_ASSERTCRASH(info->m_heapIndex >= 0 && (UnsignedInt)info->m_heapIndex < m_heapSize, ("Invalid heap index on remove."));
+	UnsignedInt index = info->m_heapIndex;
+	info->m_heapIndex = -1;
+	m_heapSize--;
+	if (index == m_heapSize) {
+		return; // Was last element, just shrink
+	}
+	s_heap[index] = s_heap[m_heapSize];
+	s_heap[index]->m_heapIndex = index;
+	heapSiftUp(index);
+	heapSiftDown(index);
 }
 
 //-----------------------------------------------------------------------------------
@@ -1858,15 +1957,12 @@ void PathfindCell::putOnSortedOpenList( PathfindCellList &list )
 	}
 #endif
 
-	// TheSuperHackers @performance Mauller 20/03/2026 Implement reverse insertion sorting.
-	// Long and complex paths often append PathfindCell's, with high total path costs, to the open list.
-	// Appending and reverse traversal allow faster insertion of these cells, reducing pathfinding overhead by 50 - 66%.
-	if (list.canReverseSort(*this)) {
-		reverseInsertionSort(list);
-	}
-	else {
-		forwardInsertionSort(list);
-	}
+	DEBUG_ASSERTCRASH(m_info, ("Has to have info."));
+	DEBUG_ASSERTCRASH(m_info->m_closed == FALSE && m_info->m_open == FALSE, ("Serious error - Invalid flags. jba"));
+
+	m_info->m_open = true;
+	m_info->m_closed = false;
+	list.heapPush(m_info);
 }
 
 /// remove self from "open" list
@@ -1874,27 +1970,49 @@ void PathfindCell::removeFromOpenList( PathfindCellList &list )
 {
 	DEBUG_ASSERTCRASH(m_info, ("Has to have info."));
 	DEBUG_ASSERTCRASH(m_info->m_closed==FALSE && m_info->m_open==TRUE, ("Serious error - Invalid flags. jba"));
-	if (m_info->m_nextOpen)
-		m_info->m_nextOpen->m_prevOpen = m_info->m_prevOpen;
-	else {
-		list.m_tail = getPrevOpen();
+
+#if RETAIL_COMPATIBLE_PATHFINDING
+	if (!s_useFixedPathfinding) {
+		// Retail path: linked list removal
+		if (m_info->m_nextOpen)
+			m_info->m_nextOpen->m_prevOpen = m_info->m_prevOpen;
+		else
+			list.m_tail = getPrevOpen();
+
+		if (m_info->m_prevOpen)
+			m_info->m_prevOpen->m_nextOpen = m_info->m_nextOpen;
+		else
+			list.m_head = getNextOpen();
+
+		m_info->m_open = false;
+		m_info->m_nextOpen = nullptr;
+		m_info->m_prevOpen = nullptr;
+		return;
 	}
+#endif
 
-	if (m_info->m_prevOpen)
-		m_info->m_prevOpen->m_nextOpen = m_info->m_nextOpen;
-	else
-		list.m_head = getNextOpen();
-
+	list.heapRemove(m_info);
 	m_info->m_open = false;
-	m_info->m_nextOpen = nullptr;
-	m_info->m_prevOpen = nullptr;
-
 }
 
 /// remove all cells from "open" list
 Int PathfindCell::releaseOpenList( PathfindCellList &list )
 {
 	Int count = 0;
+
+	// Release heap-based open list entries (non-retail path)
+	while (list.m_heapSize > 0) {
+		list.m_heapSize--;
+		PathfindCellInfo *info = PathfindCellList::s_heap[list.m_heapSize];
+		DEBUG_ASSERTCRASH(info, ("Has to have info."));
+		DEBUG_ASSERTCRASH(info->m_closed==FALSE && info->m_open==TRUE, ("Serious error - Invalid flags. jba"));
+		info->m_heapIndex = -1;
+		info->m_open = FALSE;
+		info->m_cell->releaseInfo();
+		count++;
+	}
+
+	// Release linked-list-based open list entries (retail compatible path)
 	while (list.m_head) {
 		count++;
 		DEBUG_ASSERTCRASH(list.m_head->m_info, ("Has to have info."));
@@ -4894,18 +5012,32 @@ void Pathfinder::debugShowSearch(  Bool pathFound  )
 		addIcon(nullptr, 0, 0, color);	 // erase.
 	}
 
-	for( s = m_openList.getHead(); s; s=s->getNextOpen() )
-	{
-		// create objects to show path - they decay
-		RGBColor color;
-		color.red = color.green = 0;
-		color.blue = 1;
+	if (m_openList.getHeapSize() > 0) {
+		for (UnsignedInt hi = 0; hi < m_openList.getHeapSize(); hi++) {
+			s = m_openList.getHeapCell(hi);
+			RGBColor color;
+			color.red = color.green = 0;
+			color.blue = 1;
 
-		Coord3D pos;
-		pos.x = ((Real)s->getXIndex() + 0.5f) * PATHFIND_CELL_SIZE_F;
-		pos.y = ((Real)s->getYIndex() + 0.5f) * PATHFIND_CELL_SIZE_F;
-		pos.z = TheTerrainLogic->getLayerHeight( pos.x, pos.y, s->getLayer() ) + 0.5f;
-		addIcon(&pos, PATHFIND_CELL_SIZE_F*.6f, 200, color);
+			Coord3D pos;
+			pos.x = ((Real)s->getXIndex() + 0.5f) * PATHFIND_CELL_SIZE_F;
+			pos.y = ((Real)s->getYIndex() + 0.5f) * PATHFIND_CELL_SIZE_F;
+			pos.z = TheTerrainLogic->getLayerHeight( pos.x, pos.y, s->getLayer() ) + 0.5f;
+			addIcon(&pos, PATHFIND_CELL_SIZE_F*.6f, 200, color);
+		}
+	} else {
+		for( s = m_openList.getHead(); s; s=s->getNextOpen() )
+		{
+			RGBColor color;
+			color.red = color.green = 0;
+			color.blue = 1;
+
+			Coord3D pos;
+			pos.x = ((Real)s->getXIndex() + 0.5f) * PATHFIND_CELL_SIZE_F;
+			pos.y = ((Real)s->getYIndex() + 0.5f) * PATHFIND_CELL_SIZE_F;
+			pos.z = TheTerrainLogic->getLayerHeight( pos.x, pos.y, s->getLayer() ) + 0.5f;
+			addIcon(&pos, PATHFIND_CELL_SIZE_F*.6f, 200, color);
+		}
 	}
 
 	for( s = m_closedList.getHead(); s; s=s->getNextOpen() )

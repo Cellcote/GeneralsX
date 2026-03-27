@@ -239,6 +239,8 @@ protected:
 
 	ObjectID m_obstacleID;	///< the object ID who overlaps this cell
 
+	Int m_heapIndex;															///< Position in binary heap, -1 if not in heap
+
 	UnsignedInt m_isFree:1;
 	UnsignedInt m_blockedByAlly:1;///< True if this cell is blocked by an allied unit.
 	UnsignedInt m_obstacleIsFence:1;///< True if occupied by a fence.
@@ -254,23 +256,39 @@ class PathfindCellList
 	friend class PathfindCell;
 
 public:
-	PathfindCellList() : m_head(nullptr), m_tail(nullptr) {}
+	PathfindCellList() : m_head(nullptr), m_tail(nullptr), m_heapSize(0) {}
 
 #if RETAIL_COMPATIBLE_PATHFINDING
-	void reset(PathfindCell* newHead = nullptr) { m_head = newHead; m_tail = nullptr; }
+	void reset(PathfindCell* newHead = nullptr) { m_head = newHead; m_tail = nullptr; m_heapSize = 0; }
 #else
-	void reset() { m_head = nullptr; m_tail = nullptr; }
+	void reset() { m_head = nullptr; m_tail = nullptr; m_heapSize = 0; }
 #endif
 
-	PathfindCell* getHead() const { return m_head; }
+	PathfindCell* getHead() const;
 
-	Bool empty() const { return m_head == nullptr; }
+	Bool empty() const { return m_head == nullptr && m_heapSize == 0; }
 
 	Bool canReverseSort(PathfindCell& currentCell) const;
 
+	// Binary min-heap operations for O(log n) open list management
+	void heapPush(PathfindCellInfo* info);
+	void heapRemove(PathfindCellInfo* info);
+
+	UnsignedInt getHeapSize() const { return m_heapSize; }
+	PathfindCell* getHeapCell(UnsignedInt index) const;
+
+	static void allocateHeap();
+	static void releaseHeap();
+
 private:
+	void heapSiftUp(UnsignedInt index);
+	void heapSiftDown(UnsignedInt index);
+
 	PathfindCell* m_head;
 	PathfindCell* m_tail;
+
+	static PathfindCellInfo** s_heap;
+	UnsignedInt m_heapSize;
 };
 
 /**
