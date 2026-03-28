@@ -2710,6 +2710,15 @@ void AIPlayer::update()
 
 }
 
+static void addFactoryToBuildList( Object *obj, void *userData )
+{
+	Player *player = static_cast<Player*>(userData);
+	ProductionUpdateInterface *pu = obj->getProductionUpdateInterface();
+	if (pu) {
+		player->addToBuildList(obj);
+	}
+}
+
 //----------------------------------------------------------------------------------------------------------
 /**
  * Find any things that build stuff & add them to the build list.  Then build any initially built
@@ -2719,20 +2728,7 @@ void AIPlayer::newMap()
 {
 	BuildListInfo *info = m_player->getBuildList();
 	// Add any factories placed to the build list.
-	Object *obj;
-	for( obj = TheGameLogic->getFirstObject(); obj; obj = obj->getNextObject() )
-	{
-
-		Player *owner = obj->getControllingPlayer();
-		if (owner==m_player) {
-			// See if it's a factory.
-			ProductionUpdateInterface *pu = obj->getProductionUpdateInterface();
-			// If it doesn't produce, continue.
-			if (!pu) continue;
-			m_player->addToBuildList(obj);
-		}
-
-	}
+	m_player->iterateObjects( addFactoryToBuildList, m_player );
 	computeCenterAndRadiusOfBase(&m_baseCenter, &m_baseRadius);
 
 	// Build any with the initially built flag.
@@ -2887,6 +2883,62 @@ enum GameDifficulty AIPlayer::getAIDifficulty() const
 	return m_difficulty;
 }
 
+struct FindDozerData {
+	const Coord3D *pos;
+	ObjectID repairDozerID;
+	Object *dozer;
+	Object *closestDozer;
+	Real closestDistSqr;
+	Bool needDozer;
+};
+
+static void findDozerCallback( Object *obj, void *userData )
+{
+	FindDozerData *data = static_cast<FindDozerData*>(userData);
+	if (!obj->isKindOf(KINDOF_DOZER)) return;
+
+	AIUpdateInterface *ai = obj->getAIUpdateInterface();
+	if (ai==nullptr) return;
+
+	DozerAIInterface* dozerAI = ai->getDozerAIInterface();
+	if (!dozerAI) return;
+
+	// Since workers can be dozers, hmmm....
+	SupplyTruckAIInterface* supplyTruckAI = ai->getSupplyTruckAIInterface();
+	if( !dozerAI->isAnyTaskPending() && supplyTruckAI ) {
+		// If it is gathering supplies, don't steal it.
+		if (supplyTruckAI->isCurrentlyFerryingSupplies() || supplyTruckAI->isForcedIntoWantingState())
+		{
+			return;
+		}
+	}
+	if (obj->getID() == data->repairDozerID) {
+		return; // don't steal the repair dozer.
+	}
+	data->needDozer = false; // dozer exists, may be busy.
+	if (dozerAI->isTaskPending(DOZER_TASK_BUILD)) {
+		return; // already building.
+	}
+	if (!dozerAI->isAnyTaskPending()) {
+		data->dozer = obj; // prefer an idle dozer
+	}
+	if (data->dozer==nullptr) {
+		data->dozer = obj; // but we'll take one doing stuff.
+	}
+	if (data->dozer && !dozerAI->isAnyTaskPending()) {
+		// Got a good one, track closest.
+		Real dx = data->pos->x - data->dozer->getPosition()->x;
+		Real dy = data->pos->y - data->dozer->getPosition()->y;
+		Real distSqr = dx*dx+dy*dy;
+		if (data->closestDozer == nullptr) {
+			data->closestDozer = data->dozer;
+			data->closestDistSqr = distSqr;
+		} else if (distSqr < data->closestDistSqr) {
+			data->closestDozer = data->dozer;
+			data->closestDistSqr = distSqr;
+		}
+	}
+}
 
 //----------------------------------------------------------------------------------------------------------
 /**
@@ -2894,71 +2946,22 @@ enum GameDifficulty AIPlayer::getAIDifficulty() const
  */
 Object * AIPlayer::findDozer( const Coord3D *pos )
 {
-	// Add any factories placed to the build list.
-	Object *obj;
 	Object *dozer = nullptr;
 	Bool needDozer = true;
 	Object *closestDozer=nullptr;
 	Real closestDistSqr = 0;
 
-	for( obj = TheGameLogic->getFirstObject(); obj; obj = obj->getNextObject() )
-	{
-
-		Player *owner = obj->getControllingPlayer();
-		if (owner==m_player) {
-			// See if it's a dozer.
-			if (obj->isKindOf(KINDOF_DOZER)) {
-
-				AIUpdateInterface *ai = obj->getAIUpdateInterface();
-				if (ai==nullptr) {
-					continue;
-				}
-
-
-				DozerAIInterface* dozerAI = ai->getDozerAIInterface();
-				if (dozerAI) {
-					// Since workers can be dozers, hmmm....
-					SupplyTruckAIInterface* supplyTruckAI = ai->getSupplyTruckAIInterface();
-					if( !dozerAI->isAnyTaskPending() && supplyTruckAI ) {
-						// If it is gathering supplies, don't steal it.
-						if (supplyTruckAI->isCurrentlyFerryingSupplies() || supplyTruckAI->isForcedIntoWantingState())
-						{
-							continue;
-						}
-					}
-					if (obj->getID() == m_repairDozer) {
-						continue; // don't steal the repair dozer.
-					}
-					needDozer = false; // dozer exists, may be busy.
-					if (dozerAI->isTaskPending(DOZER_TASK_BUILD)) {
-						continue; // already building.
-					}
-					if (!dozerAI->isAnyTaskPending()) {
-						dozer = obj; // prefer an idle dozer
-					}
-					if (dozer==nullptr) {
-						dozer = obj; // but we'll take one doing stuff.
-					}
-					if (dozer && !dozerAI->isAnyTaskPending()) {
-						// Got a good one, track closest.
-						Real distSqr;
-						Real dx, dy;
-						dx = pos->x - dozer->getPosition()->x;
-						dy = pos->y - dozer->getPosition()->y;
-						distSqr = dx*dx+dy*dy;
-						if (closestDozer == nullptr) {
-							closestDozer = dozer;
-							closestDistSqr = distSqr;
-						} else if (distSqr < closestDistSqr) {
-							closestDozer = dozer;
-							closestDistSqr = distSqr;
-						}
-					}
-				}
-			}
-		}
-
-	}
+	FindDozerData dozerData;
+	dozerData.pos = pos;
+	dozerData.repairDozerID = m_repairDozer;
+	dozerData.dozer = nullptr;
+	dozerData.closestDozer = nullptr;
+	dozerData.closestDistSqr = 0;
+	dozerData.needDozer = true;
+	m_player->iterateObjects( findDozerCallback, &dozerData );
+	dozer = dozerData.dozer;
+	closestDozer = dozerData.closestDozer;
+	needDozer = dozerData.needDozer;
 	if (needDozer) {
 		queueDozer();
 	}
