@@ -6285,7 +6285,7 @@ bool Pathfinder::checkCellOutsideExtents(ICoord2D& cell) {
 					cell.y > m_logicalExtent.hi.y;
 }
 
-
+#if RETAIL_COMPATIBLE_PATHFINDING
 struct ExamineCellsStruct
 {
 	Pathfinder					*thePathfinder;
@@ -6386,6 +6386,8 @@ struct ExamineCellsStruct
 
 	return 0;	// keep going
 }
+#endif
+
 
 
 Int Pathfinder::examineNeighboringCells(PathfindCell *parentCell, PathfindCell *goalCell, const LocomotorSet& locomotorSet,
@@ -6397,22 +6399,32 @@ Int Pathfinder::examineNeighboringCells(PathfindCell *parentCell, PathfindCell *
 			canPathThroughUnits = obj->getAIUpdateInterface()->canPathThroughUnits();
 		}
 		Bool isCrusher = obj ? obj->getCrusherLevel() > 0 : false;
-		if (attackDistance==NO_ATTACK && !m_isTunneling && !locomotorSet.isDownhillOnly() && goalCell) {
-			ExamineCellsStruct info;
-			info.thePathfinder = this;
-			info.theLoco = &locomotorSet;
-			info.centerInCell = centerInCell;
-			info.radius = radius;
-			info.obj = obj;
-			info.isHuman = isHuman;
-			info.goalCell = goalCell;
-			ICoord2D start, end;
-			start.x = parentCell->getXIndex();
-			start.y = parentCell->getYIndex();
-			end.x = goalCell->getXIndex();
-			end.y = goalCell->getYIndex();
-			iterateCellsAlongLine(start, end, parentCell->getLayer(), examineCellsCallback, &info);
+
+		// TheSuperHackers @perf The retail code traces a Bresenham line from every expanded cell
+		// to the goal, running full collision checks per cell along the line. This is O(distance_to_goal)
+		// work per cell expansion, making the overall A* search O(n^2). The fixed path skips this
+		// because the A* heuristic already biases toward the goal, and Path::optimize() handles
+		// line-of-sight smoothing as a post-processing step.
+#if RETAIL_COMPATIBLE_PATHFINDING
+		if (!s_useFixedPathfinding) {
+			if (attackDistance==NO_ATTACK && !m_isTunneling && !locomotorSet.isDownhillOnly() && goalCell) {
+				ExamineCellsStruct info;
+				info.thePathfinder = this;
+				info.theLoco = &locomotorSet;
+				info.centerInCell = centerInCell;
+				info.radius = radius;
+				info.obj = obj;
+				info.isHuman = isHuman;
+				info.goalCell = goalCell;
+				ICoord2D start, end;
+				start.x = parentCell->getXIndex();
+				start.y = parentCell->getYIndex();
+				end.x = goalCell->getXIndex();
+				end.y = goalCell->getYIndex();
+				iterateCellsAlongLine(start, end, parentCell->getLayer(), examineCellsCallback, &info);
+			}
 		}
+#endif
 
 		Int cellCount = 0;
 		// expand search to neighboring orthogonal cells
