@@ -321,8 +321,6 @@ void W3DProjectedShadowManager::invalidateCachedLightPositions()
 
 void W3DProjectedShadowManager::updateRenderTargetTextures()
 {
-	///@todo: Don't update texture for shadows that can't be seen!!
-
 	W3DProjectedShadow *shadow;
 	if (!m_shadowList)
 		return;	//there are no shadows to render.
@@ -334,7 +332,7 @@ void W3DProjectedShadowManager::updateRenderTargetTextures()
 	for( shadow = m_shadowList; shadow; shadow = shadow->m_next )
 	{	//decals don't need any updates on a per-frame basis since
 		//the image never changes.
-		if (shadow->m_type != SHADOW_DECAL)
+		if (shadow->m_type != SHADOW_DECAL && shadow->m_robj && shadow->m_robj->Is_Really_Visible())
 			shadow->update();
 	}
 }
